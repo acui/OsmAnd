@@ -1,0 +1,4 @@
+[submodule "plugins/Osmand-TopoPrintPlugin"]
+	path = plugins/Osmand-TopoPrintPlugin
+	url = https://github.com/acui/osmand_topo_map_generator.git
+	branch = osmand_plugin
