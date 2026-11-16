@@ -17,6 +17,7 @@ import net.osmand.core.android.MapRendererView.MapRendererViewListener;
 import net.osmand.core.jni.PointI;
 import net.osmand.core.jni.ZoomLevel;
 import net.osmand.data.LatLon;
+import net.osmand.data.RotatedTileBox;
 import net.osmand.plus.OsmandApplication;
 import net.osmand.plus.R;
 import net.osmand.plus.plugins.PluginsHelper;
@@ -26,9 +27,16 @@ import net.osmand.plus.plugins.topoprint.compose.UtmMath;
 import net.osmand.plus.plugins.topoprint.compose.UtmQuadrilateral;
 import net.osmand.plus.utils.NativeUtilities;
 import net.osmand.plus.views.OsmandMapTileView;
+import net.osmand.plus.views.layers.FavouritesLayer;
+import net.osmand.plus.views.layers.GPXLayer;
+import net.osmand.plus.views.layers.MapMarkersLayer;
 import net.osmand.plus.views.layers.PointLocationLayer;
+import net.osmand.plus.views.layers.TransportStopsLayer;
+import net.osmand.plus.views.layers.base.OsmandMapLayer;
 import net.osmand.plus.views.corenative.NativeCoreContext;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
@@ -254,30 +262,89 @@ public class GLOffscreenRenderer implements MapRendererViewListener {
 		tileView.setMapRenderer(offscreenView, true);
 		Bitmap probe = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888);
 		Canvas probeCanvas = new Canvas(probe);
-		tileView.drawOverMap(probeCanvas, tileView.getCurrentRotatedTileBox(),
-				new net.osmand.plus.views.layers.base.OsmandMapLayer.DrawSettings(false, true));
-		probeCanvas.setBitmap(null);
-		probe.recycle();
-		// Layer-owned symbol providers (location, markers) are stripped after
-		// the draw pass - only the map and its raster layers belong in the
-		// print.
-		offscreenView.removeAllSymbolsProviders();
-		// …but the layers that own those providers subscribed as frame
-		// listeners during the probe draw (OsmandMapLayer
-		// .onPrepareBufferImage → addListener) and re-register their
-		// providers from the frame callbacks — PointLocationLayer
-		// .onUpdateFrame → setMarkerProvider — so the my-location cone
-		// reappeared in every frame rendered after the strip whenever the
-		// print area covered the current position. Detach the layer
-		// listeners as well; the plugin's own listener is added further
-		// below and survives.
-		for (net.osmand.plus.views.layers.base.OsmandMapLayer layer : tileView.getLayers()) {
-			if (layer instanceof MapRendererViewListener) {
-				offscreenView.removeListener((MapRendererViewListener) layer);
+		try {
+			RotatedTileBox probeBox = tileView.getCurrentRotatedTileBox();
+			OsmandMapLayer.DrawSettings drawSettings = new OsmandMapLayer.DrawSettings(false, true);
+			tileView.drawOverMap(probeCanvas, probeBox, drawSettings);
+			// Symbol providers (location, context menu …) are stripped after the
+			// draw pass; the print keeps the map, its raster layers and the
+			// user-content overlays re-registered below. NOTE: the overlays
+			// just rebuilt their providers during the probe draw and will
+			// rebuild them AGAIN after the strip — that double work is the
+			// price of the raster-layer rebind, which only the full draw pass
+			// can run (raster providers are not symbols and survive the strip;
+			// symbol providers cannot be selectively kept).
+			offscreenView.removeAllSymbolsProviders();
+			// …but the layers that own those providers subscribed as frame
+			// listeners during the probe draw (OsmandMapLayer
+			// .onPrepareBufferImage → addListener) and re-register their
+			// providers from the frame callbacks — PointLocationLayer
+			// .onUpdateFrame → setMarkerProvider — so the my-location cone
+			// reappeared in every frame rendered after the strip whenever the
+			// print area covered the current position. Detach the layer
+			// listeners as well; the plugin's own listener is added further
+			// below and survives.
+			detachLayerFrameListeners();
+			// Re-register the user-content overlays the print must show — GPX
+			// tracks and waypoints, favorites, map markers and transport stops
+			// are symbol-provider-drawn in GL mode and were stripped with
+			// everything else above. TransportStopsLayer is kept deliberately:
+			// on screen its provider (not the map style) draws the
+			// semi-transparent stop squares, so without it the print only
+			// shows the style's stop icons, which look different from the app.
+			// The overlay tileBox mirrors the print camera so zoom-gated
+			// providers (transport stops need z≥12, GPX waypoints START_ZOOM)
+			// register exactly for the printed detail level; density stays the
+			// screen one so the icons keep their familiar on-screen size.
+			RotatedTileBox overlayBox = new RotatedTileBox.RotatedTileBoxBuilder()
+					.setLocation(center.getLatitude(), center.getLongitude())
+					.setZoom((int) Math.round(
+							OffscreenMapRenderer.fractionalZoom(params, center.getLatitude())))
+					.density(probeBox.getDensity())
+					.setPixelDimensions(rasterWidthPx(), rasterHeightPx(), 0.5f, 0.5f)
+					.build();
+			List<OsmandMapLayer> reregistered = new ArrayList<>();
+			for (OsmandMapLayer layer : tileView.getLayers()) {
+				if (isPrintOverlayLayer(layer)) {
+					// The layers cache their providers behind data-version
+					// checks, so a plain redraw would skip the re-add after
+					// the strip; mapRendererChanged forces GPXLayer,
+					// FavouritesLayer and TransportStopsLayer to rebuild and
+					// re-add now (MapMarkersLayer re-adds through its
+					// hasSymbolsProvider guard on its own).
+					try {
+						layer.setMapRendererChanged(true);
+						layer.onPrepareBufferImage(probeCanvas, overlayBox, drawSettings);
+						reregistered.add(layer);
+					} catch (Exception | OutOfMemoryError e) {
+						// One broken overlay must not abort the setup mid-way
+						// — that would strand the frozen main map and the
+						// offscreen view. OutOfMemoryError is caught too: big
+						// GPX tracks rebuilding their providers here are the
+						// realistic OOM source. The layer is simply missing
+						// from this print instead.
+						Log.w(TAG, "overlay re-registration failed: "
+								+ layer.getClass().getSimpleName(), e);
+					}
+				}
 			}
-			if (layer instanceof PointLocationLayer) {
-				locationLayer = (PointLocationLayer) layer;
+			// The registration above re-attached the overlays' frame listeners
+			// — detach them again so the static scene settles instead of the
+			// providers repainting every frame. Only the layers that actually
+			// re-registered carry listeners now (the first
+			// detachLayerFrameListeners() pass above stripped everyone else),
+			// so detach just those — and reset the forced flag so no layer is
+			// left holding mapRendererChanged=true behind a cache check that
+			// never consumes it (MapMarkersLayer ignores the flag entirely).
+			for (OsmandMapLayer layer : reregistered) {
+				if (layer instanceof MapRendererViewListener) {
+					offscreenView.removeListener((MapRendererViewListener) layer);
+				}
+				layer.setMapRendererChanged(false);
 			}
+		} finally {
+			probeCanvas.setBitmap(null);
+			probe.recycle();
 		}
 		if (locationLayer != null) {
 			// The location layer also subscribes to the sensors directly
@@ -825,6 +892,24 @@ public class GLOffscreenRenderer implements MapRendererViewListener {
 					+ "] N[" + quad.getNorthingMin() + "," + quad.getNorthingMax() + "]");
 		}
 		return covered;
+	}
+
+	/** User-content layers whose symbol providers the print basemap keeps. */
+	private static boolean isPrintOverlayLayer(@NonNull OsmandMapLayer layer) {
+		return layer instanceof GPXLayer || layer instanceof FavouritesLayer
+				|| layer instanceof MapMarkersLayer || layer instanceof TransportStopsLayer;
+	}
+
+	/** Detaches every map layer's frame listener from the offscreen view. */
+	private void detachLayerFrameListeners() {
+		for (OsmandMapLayer layer : tileView.getLayers()) {
+			if (layer instanceof MapRendererViewListener) {
+				offscreenView.removeListener((MapRendererViewListener) layer);
+			}
+			if (layer instanceof PointLocationLayer) {
+				locationLayer = (PointLocationLayer) layer;
+			}
+		}
 	}
 
 	private int rasterWidthPx() {
