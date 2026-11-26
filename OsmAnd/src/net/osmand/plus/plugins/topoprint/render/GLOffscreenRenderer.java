@@ -25,6 +25,7 @@ import net.osmand.plus.plugins.topoprint.PrintParameters;
 import net.osmand.plus.plugins.topoprint.TopoPrintPlugin;
 import net.osmand.plus.plugins.topoprint.compose.UtmMath;
 import net.osmand.plus.plugins.topoprint.compose.UtmQuadrilateral;
+import net.osmand.plus.base.MapViewTrackingUtilities;
 import net.osmand.plus.utils.NativeUtilities;
 import net.osmand.plus.views.OsmandMapTileView;
 import net.osmand.plus.views.layers.FavouritesLayer;
@@ -115,6 +116,16 @@ public class GLOffscreenRenderer implements MapRendererViewListener {
 	/** Location layer, captured during the print to detach it from the sensors. */
 	private PointLocationLayer locationLayer;
 	private boolean locationDetached;
+	/**
+	 * Camera-driving sensors paused for the print (same pattern as the
+	 * flyover recorder): with the map linked to the location, every GPS fix
+	 * and compass heading change moves the shared renderer through
+	 * MapViewTrackingUtilities — the calibration never converges and the
+	 * capture gate exhausts all retries on a moving target (observed
+	 * outdoors as ~30 min of "frames keep counting, nothing renders").
+	 */
+	private boolean trackingPausedByUs;
+	private boolean trackingWasLinkedToLocation;
 	/**
 	 * True once {@link #offscreenView} completed setupRenderer and got this
 	 * listener attached. MapRendererView.removeListener() synchronizes on its
@@ -214,6 +225,23 @@ public class GLOffscreenRenderer implements MapRendererViewListener {
 		printContext.updateMapSettings(true);
 		Log.i(TAG, "print presentation: rasterMapScale=1.0 symbolsScale=" + symbolsScale
 				+ " (style: " + app.getSettings().RENDERER.get() + ")");
+		// Pause the camera-driving sensors before the renderer handover (the
+		// same pattern as the flyover recorder): with the map linked to the
+		// location, every GPS fix and compass change moves the main tileView —
+		// which is re-bound to the OFFSCREEN renderer in step2 — so the
+		// calibration would chase a moving camera and the capture gate would
+		// exhaust all retries. Indoors this is invisible; walking outdoors it
+		// kept the render "counting frames" for ~30 min without output.
+		mainHandler.post(() -> {
+			MapViewTrackingUtilities tracking = app.getMapViewTrackingUtilities();
+			if (tracking != null && !tracking.isTrackingPaused()) {
+				trackingPausedByUs = true;
+				trackingWasLinkedToLocation = tracking.isMapLinkedToLocation();
+				tracking.setTrackingPaused(true);
+				tracking.setMapLinkedToLocation(false);
+				tileView.getAnimatedDraggingThread().stopAnimatingSync();
+			}
+		});
 		// Detach the main map: freezes it during the print render and avoids
 		// two GL contexts fighting over the (software) renderer.
 		tileView.setMapRenderer(null, true);
@@ -1014,6 +1042,19 @@ public class GLOffscreenRenderer implements MapRendererViewListener {
 			}
 		}
 		tileView = null;
+		// Resume the camera-driving sensors only after the main map is fully
+		// restored — the first GPS fix after un-pausing re-links and moves the
+		// (now live) map to the current position.
+		if (trackingPausedByUs) {
+			trackingPausedByUs = false;
+			MapViewTrackingUtilities tracking = app.getMapViewTrackingUtilities();
+			if (tracking != null) {
+				tracking.setTrackingPaused(false);
+				if (trackingWasLinkedToLocation) {
+					tracking.setMapLinkedToLocation(true);
+				}
+			}
+		}
 		// The EGL hand-over leaves the main renderer waiting for its first
 		// frame request. After a successful capture the just-drawn frame acts
 		// as one; on the cancel/fail paths nothing else triggers a redraw and

@@ -586,6 +586,10 @@ public class MapViewTrackingUtilities implements OsmAndLocationListener, IMapLoc
 		}
 	}
 
+	public boolean isTrackingPaused() {
+		return trackingPaused;
+	}
+
 	public boolean isMapLinkedToLocation() {
 		return isMapLinkedToLocation;
 	}
