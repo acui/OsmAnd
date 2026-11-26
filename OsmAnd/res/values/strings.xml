@@ -17,7 +17,7 @@
 	<string name="topoprint_symbols_scale">Label scale (print)</string>
 	<string name="topoprint_symbols_scale_descr">Size of map labels and POI icons on the printout; smaller text fits more labels (default 1.0 = current app setting)</string>
 	<string name="topoprint_output_dir">Output folder</string>
-	<string name="topoprint_output_dir_descr">Absolute path for generated posters; empty uses the app\'s private topoprint folder</string>
+	<string name="topoprint_output_dir_descr">Absolute path for generated maps; empty uses the app\'s private topoprint folder</string>
 	<string name="topoprint_saved_to">Saved to %s</string>
 	<string name="topoprint_generate">Generate print map</string>
 	<string name="topoprint_progress_prepare">Preparing the print map context...</string>

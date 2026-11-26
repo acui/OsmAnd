@@ -56,11 +56,11 @@ class TopoPrintPluginTest {
 		val expectedWidthPx = Math.round(params.layout.mapWidthMm * params.dpi / 25.4).toInt()
 		assertEquals(expectedWidthPx, params.rasterWidthPx)
 
-		// Poster geometry for the UTM 50S 431000 4425000 test point.
+		// Map geometry for the UTM 50S 431000 4425000 test point.
 		val geometry = PrintGeometry.compute(params, 39.972342, 116.191987, -7.5)
 		assertEquals(50, geometry.centerUtm.zoneNumber)
 		assertEquals("50S", geometry.zoneLabel)
-		// The poster uses the numerical convergence (bearing centre →
+		// The map uses the numerical convergence (bearing centre →
 		// top-centre of the bbox), which deviates from the analytic local
 		// value −0.5259° by the along-path variation over the 2.9 km baseline.
 		assertEquals(-0.5259, geometry.convergenceDeg, 0.02)
